@@ -1,5 +1,5 @@
 import type { z } from 'zod'
-import type { TaskContext, SetAppState, AppState } from './Task.js'
+import type { AppState } from './Task.js'
 
 export type ToolInputJSONSchema = {
   [x: string]: unknown
@@ -141,6 +141,8 @@ type DefaultableToolKeys =
   | 'checkPermissions'
   | 'toAutoClassifierInput'
   | 'userFacingName'
+  | 'prompt'
+  | 'mapToolResultToToolResultBlockParam'
 
 export type ToolDef<
   Input extends AnyObject = AnyObject,
@@ -169,6 +171,8 @@ const TOOL_DEFAULTS = {
     Promise.resolve({ behavior: 'allow', updatedInput: input }),
   toAutoClassifierInput: (_input?: unknown) => '',
   userFacingName: (_input?: unknown, _tool?: Tool) => '',
+  prompt: async ({ tools }: { tools: Tools }): Promise<string> => '',
+  mapToolResultToToolResultBlockParam: (_content: unknown, _toolUseID: string): unknown => ({}),
 } as const
 
 type ToolDefaults = typeof TOOL_DEFAULTS

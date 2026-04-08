@@ -1,6 +1,6 @@
-import type { EventEmitter } from 'events'
-import type { Message, ToolUseContext, PermissionResult } from '../core/Tool.js'
-import type { TaskType, TaskStatus, TaskStateBase, generateTaskId } from '../core/Task.js'
+import { EventEmitter } from 'events'
+import type { ToolUseContext, PermissionResult } from '../core/Tool.js'
+import type { TaskType, TaskStatus } from '../core/Task.js'
 
 export interface ChannelMessage {
   id: string
@@ -30,6 +30,7 @@ export type ChannelType =
   | 'whatsapp'
   | 'webchat'
   | 'webhook'
+  | 'qqbot'
   | 'custom'
 
 export type ChannelStatus = 'connected' | 'disconnected' | 'connecting' | 'error'
@@ -47,7 +48,7 @@ export abstract class BaseChannel {
 
   protected config: ChannelConfig
   protected status: ChannelStatus = 'disconnected'
-  protected eventHandlers: Map<string, Set<(event: ChannelEvent) => void>> = new Map()
+  private emitter = new EventEmitter()
 
   constructor(config: ChannelConfig) {
     this.config = config
@@ -71,27 +72,22 @@ export abstract class BaseChannel {
   }
 
   on(eventType: string, handler: (event: ChannelEvent) => void): () => void {
-    if (!this.eventHandlers.has(eventType)) {
-      this.eventHandlers.set(eventType, new Set())
-    }
-    this.eventHandlers.get(eventType)!.add(handler)
-
+    this.emitter.on(eventType, handler as (...args: unknown[]) => void)
     return () => {
-      this.eventHandlers.get(eventType)?.delete(handler)
+      this.emitter.off(eventType, handler as (...args: unknown[]) => void)
     }
   }
 
+  off(eventType: string, handler: (event: ChannelEvent) => void): void {
+    this.emitter.off(eventType, handler as (...args: unknown[]) => void)
+  }
+
+  once(eventType: string, handler: (event: ChannelEvent) => void): void {
+    this.emitter.once(eventType, handler as (...args: unknown[]) => void)
+  }
+
   protected emit(event: ChannelEvent): void {
-    const handlers = this.eventHandlers.get(event.type)
-    if (handlers) {
-      for (const handler of handlers) {
-        try {
-          handler(event)
-        } catch (error) {
-          console.error(`[Channel:${this.name}] Event handler error:`, error)
-        }
-      }
-    }
+    this.emitter.emit(event.type, event)
   }
 
   protected setStatus(status: ChannelStatus): void {

@@ -1,7 +1,7 @@
 import { WebSocketServer, WebSocket } from 'ws'
 import http from 'node:http'
 import type { ToolUseContext, PermissionResult } from '../core/Tool.js'
-import type { Message } from '../core/QueryEngine.ts'
+import type { Message } from '../core/QueryEngine.js'
 import type { AppState } from '../core/Task.js'
 
 export interface GatewayConfig {
@@ -361,6 +361,15 @@ export class GatewayServer {
     this.emit({
       type: 'error',
       clientId,
+      error,
+      timestamp: Date.now(),
+    })
+  }
+
+  private handleError(error: Error): void {
+    console.error('[Gateway] Server error:', error)
+    this.emit({
+      type: 'error',
       error,
       timestamp: Date.now(),
     })

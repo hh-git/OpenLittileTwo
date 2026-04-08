@@ -3,7 +3,7 @@ import { createJiti } from 'jiti'
 import path from 'node:path'
 import fs from 'node:fs'
 import type { Tool, Tools, ToolUseContext } from '../core/Tool.js'
-import type { TaskType, TaskStateBase, AppState } from '../core/Task.js'
+import type { TaskType, AppState } from '../core/Task.js'
 
 export interface PluginManifest {
   name: string
@@ -15,6 +15,7 @@ export interface PluginManifest {
   permissions?: string[]
   dependencies?: string[]
   configSchema?: Record<string, unknown>
+  enabled?: boolean
 }
 
 export interface PluginDefinition {
@@ -289,6 +290,6 @@ class PluginLoaderImpl {
 
 export const PluginLoader = new PluginLoaderImpl()
 
-export function definePlugin(factory: (context: PluginContext) => PluginInstance | Promise<PluginInstance>): () => PluginInstance | Promise<PluginInstance> {
+export function definePlugin(factory: (context: PluginContext) => PluginInstance | Promise<PluginInstance>): (context: PluginContext) => PluginInstance | Promise<PluginInstance> {
   return factory
 }

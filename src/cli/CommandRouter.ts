@@ -1,8 +1,8 @@
 import { Command } from 'commander'
 import chalk from 'chalk'
 import type { Tool, Tools, ToolUseContext, PermissionResult } from '../core/Tool.js'
-import type { QueryEngine, QueryParams, QuerySource } from '../core/QueryEngine.ts'
-import type { AppState } from '../core/Task.ts'
+import type { QueryEngine, QueryParams, QuerySource } from '../core/QueryEngine.js'
+import type { AppState } from '../core/Task.js'
 
 export interface CLIContext {
   state: AppState
@@ -50,17 +50,17 @@ export class CLICommandRouter {
       .command(definition.name)
       .description(definition.description)
 
-    if (definition.aliases) {
-      command.alias(...definition.aliases)
+    if (definition.aliases && definition.aliases.length > 0) {
+      command.alias(definition.aliases[0])
     }
 
     if (definition.options) {
       for (const option of definition.options) {
-        command.option(
-          option.flags,
-          option.description,
-          option.defaultValue,
-        )
+        if (option.defaultValue !== undefined) {
+          command.option(option.flags, option.description, option.defaultValue as string | boolean | string[] | undefined)
+        } else {
+          command.option(option.flags, option.description)
+        }
       }
     }
 
@@ -157,7 +157,8 @@ export const createDefaultCommands = (): CommandDefinition[] => [
     category: 'Channels',
     aliases: ['ch'],
     handler: async (args, _context) => {
-      const action = args.args?.[0] as string
+      const cmdArgs = args.args as string[] | undefined
+      const action = cmdArgs?.[0]
 
       switch (action) {
         case 'list':
@@ -178,8 +179,9 @@ export const createDefaultCommands = (): CommandDefinition[] => [
     category: 'Plugins',
     aliases: ['pl'],
     handler: async (args, context) => {
-      const action = args.args?.[0] as string
-      const pluginName = args.args?.[1] as string
+      const cmdArgs = args.args as string[] | undefined
+      const action = cmdArgs?.[0]
+      const pluginName = cmdArgs?.[1]
 
       switch (action) {
         case 'list':
@@ -277,9 +279,10 @@ export const createDefaultCommands = (): CommandDefinition[] => [
     category: 'System',
     aliases: ['cfg'],
     handler: async (args, context) => {
-      const action = args.args?.[0] as string
-      const key = args.args?.[1] as string
-      const value = args.args?.[2]
+      const cmdArgs = args.args as string[] | undefined
+      const action = cmdArgs?.[0]
+      const key = cmdArgs?.[1]
+      const value = cmdArgs?.[2]
 
       switch (action) {
         case 'get':
@@ -313,7 +316,8 @@ export const createDefaultCommands = (): CommandDefinition[] => [
       { flags: '--running', description: 'Show only running tasks' },
     ],
     handler: async (args, context) => {
-      const taskId = args.args?.[0] as string | undefined
+      const cmdArgs = args.args as string[] | undefined
+      const taskId = cmdArgs?.[0]
       const showAll = args.all as boolean | undefined
       const showRunning = args.running as boolean | undefined
 
@@ -330,11 +334,13 @@ export const createDefaultCommands = (): CommandDefinition[] => [
       if (taskId) {
         const task = context.state.tasks.get(taskId)
         if (task) {
-          console.log(`ID: ${task.id}`)
-          console.log(`Type: ${task.type}`)
+          console.log(`ID: ${task.taskId}`)
+          console.log(`Kind: ${task.taskKind ?? task.runtime}`)
           console.log(`Status: ${task.status}`)
-          console.log(`Description: ${task.description}`)
-          console.log(`Started: ${new Date(task.startTime).toLocaleString()}`)
+          console.log(`Task: ${task.task}`)
+          if (task.startedAt) {
+            console.log(`Started: ${new Date(task.startedAt).toLocaleString()}`)
+          }
         } else {
           console.log(chalk.red(`Task ${taskId} not found`))
         }
@@ -343,13 +349,13 @@ export const createDefaultCommands = (): CommandDefinition[] => [
           console.log(chalk.gray('No tasks found'))
         } else {
           for (const task of tasks) {
-            const statusColor = task.status === 'completed' 
-              ? chalk.green 
+            const statusColor = task.status === 'completed'
+              ? chalk.green
               : task.status === 'failed' || task.status === 'killed'
                 ? chalk.red
                 : chalk.yellow
-            
-            console.log(`${statusColor(task.status)} ${task.id}: ${task.description}`)
+
+            console.log(`${statusColor(task.status)} ${task.taskId}: ${task.task}`)
           }
         }
       }

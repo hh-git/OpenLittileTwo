@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { buildTool, type Tool, type ToolUseContext, type PermissionResult } from '../core/Tool.js'
+import { buildTool, type Tool, type Tools, type ToolUseContext, type PermissionResult } from '../core/Tool.js'
 import fs from 'node:fs'
 import path from 'node:path'
 
@@ -210,7 +210,6 @@ export const GrepTool = buildTool({
 
   isReadOnly: () => true,
   isConcurrencySafe: () => true,
-  isSearchOrReadCommand: () => ({ isSearch: true, isRead: false }),
   userFacingName: (input) => `Search: ${input?.pattern ?? ''}`,
   toAutoClassifierInput: (input) => `grep ${input.pattern} ${input.path}`,
 })
@@ -259,7 +258,6 @@ export const GlobTool = buildTool({
 
   isReadOnly: () => true,
   isConcurrencySafe: () => true,
-  isSearchOrReadCommand: () => ({ isSearch: false, isRead: false, isList: true }),
   userFacingName: (input) => `Glob: ${input?.pattern ?? ''}`,
   toAutoClassifierInput: (input) => `glob ${input.pattern}`,
 })

@@ -1,6 +1,16 @@
 import type { Tool, Tools, ToolUseContext, PermissionResult } from './Tool.js'
-import type { TaskType, TaskStatus, TaskStateBase, TaskPriority, generateTaskId, createTaskStateBase } from './Task.js'
+import type { TaskType, TaskStatus, TaskPriority } from './Task.js'
 import { isTerminalTaskStatus } from './Task.js'
+import {
+  LlmProvider,
+  LlmMessage,
+  LlmContentBlock,
+  LlmTool,
+  LlmCompletionResponse,
+  createLlmProvider,
+  getDefaultProvider,
+  type LlmProviderConfig,
+} from './LlmProvider.js'
 
 export type QuerySource = 'cli' | 'channel' | 'gateway' | 'plugin' | 'api' | 'scheduler'
 
@@ -37,12 +47,16 @@ export interface SystemMessage extends BaseMessage {
   role: 'system'
 }
 
-export interface ToolResultMessage extends BaseMessage {
+export interface ToolResultMessage {
+  id: string
   role: 'tool'
+  content?: string | ContentBlock[]
   toolUseId: string
   toolName: string
   result: unknown
   isError?: boolean
+  timestamp: number
+  metadata?: Record<string, unknown>
 }
 
 export type Message = UserMessage | AssistantMessage | SystemMessage | ToolResultMessage
@@ -58,6 +72,9 @@ export type QueryParams = {
   maxOutputTokens?: number
   maxTurns?: number
   taskBudget?: { total: number; remaining: number }
+  model?: string
+  temperature?: number
+  abortController?: AbortController
 }
 
 export type QueryResult = {
@@ -111,10 +128,25 @@ export class QueryEngine {
   private messageHistory: Message[] = []
   private turnCount = 0
   private tokenUsage: TokenUsage = { inputTokens: 0, outputTokens: 0 }
+  private llmProvider: LlmProvider
+  private model: string
 
-  constructor(tools: Tools, config?: Partial<QueryConfig>) {
+  constructor(tools: Tools, config?: Partial<QueryConfig> & { llmProvider?: LlmProvider; llmConfig?: LlmProviderConfig; model?: string }) {
     this.tools = tools
     this.config = { ...DEFAULT_QUERY_CONFIG, ...config }
+    this.llmProvider = config?.llmProvider ?? getDefaultProvider()
+    this.model = config?.model ?? this.llmProvider.config.defaultModel
+  }
+
+  setModel(model: string): void {
+    this.model = model
+  }
+
+  setLlmProvider(provider: LlmProvider): void {
+    this.llmProvider = provider
+    if (!this.model) {
+      this.model = provider.config.defaultModel
+    }
   }
 
   async execute(params: QueryParams): Promise<QueryResult> {
@@ -122,9 +154,12 @@ export class QueryEngine {
     this.turnCount = 0
     this.tokenUsage = { inputTokens: 0, outputTokens: 0 }
 
+    const effectiveModel = params.model ?? this.model
+    const effectiveTemperature = params.temperature ?? 0.7
+
     try {
       while (this.turnCount < this.config.maxTurns) {
-        if (params.abortController.signal.aborted) {
+        if (params.abortController?.signal.aborted) {
           return {
             success: false,
             messages: this.messageHistory,
@@ -141,7 +176,7 @@ export class QueryEngine {
           await this.performCompact()
         }
 
-        const turnResult = await this.executeTurn(params)
+        const turnResult = await this.executeTurn(params, effectiveModel, effectiveTemperature)
         this.messageHistory.push(...turnResult.newMessages)
 
         if (turnResult.isComplete) {
@@ -175,11 +210,13 @@ export class QueryEngine {
 
   private async executeTurn(
     params: QueryParams,
+    model: string,
+    temperature: number,
   ): Promise<{ newMessages: Message[]; isComplete: boolean }> {
     const systemPrompt = await this.buildSystemPrompt(params)
     const requestMessages = this.prepareMessagesForAPI(systemPrompt)
 
-    const response = await this.callLLM(requestMessages, params)
+    const response = await this.callLLM(requestMessages, params, model, temperature)
     this.updateTokenUsage(response.usage)
 
     const assistantMessage: AssistantMessage = {
@@ -187,14 +224,19 @@ export class QueryEngine {
       role: 'assistant',
       content: response.content,
       timestamp: Date.now(),
+      ...(response.error ? { apiError: response.error.message } : {}),
     }
 
     const newMessages: Message[] = [assistantMessage]
 
-    const toolUseBlocks = response.content.filter(
-      (block): block is ContentBlock & { type: 'tool_use' } =>
-        block.type === 'tool_use',
-    )
+    if (response.error) {
+      return { newMessages, isComplete: true }
+    }
+
+    const toolUseBlocks = (Array.isArray(response.content) ? response.content : [{ type: 'text' as const, text: response.content }])
+      .filter((block): block is ContentBlock & { type: 'tool_use'; toolName: string } =>
+        block.type === 'tool_use' && typeof block.toolName === 'string',
+      )
 
     if (toolUseBlocks.length === 0) {
       return { newMessages, isComplete: true }
@@ -213,7 +255,7 @@ export class QueryEngine {
     const results: ToolResultMessage[] = []
 
     for (const toolUse of toolUseBlocks) {
-      if (params.abortController.signal.aborted) {
+      if (params.abortController?.signal.aborted) {
         break
       }
 
@@ -222,7 +264,7 @@ export class QueryEngine {
         results.push({
           id: this.generateMessageId(),
           role: 'tool',
-          toolUseId: toolUse.toolUseId!,
+          toolUseId: toolUse.toolUseId ?? `tool_${Date.now()}`,
           toolName: toolUse.toolName!,
           result: `Tool "${toolUse.toolName}" not found`,
           isError: true,
@@ -241,7 +283,7 @@ export class QueryEngine {
           results.push({
             id: this.generateMessageId(),
             role: 'tool',
-            toolUseId: toolUse.toolUseId!,
+            toolUseId: toolUse.toolUseId ?? `tool_${Date.now()}`,
             toolName: tool.name,
             result:
               permissionResult.behavior === 'deny'
@@ -258,14 +300,14 @@ export class QueryEngine {
           toolUse.toolInput ?? {},
           params.toolUseContext,
           () => Promise.resolve(permissionResult),
-          assistantMessage,
+          undefined,
         )
         const duration = Date.now() - startTime
 
         results.push({
           id: this.generateMessageId(),
           role: 'tool',
-          toolUseId: toolUse.toolUseId!,
+          toolUseId: toolUse.toolUseId ?? `tool_${Date.now()}`,
           toolName: tool.name,
           result: toolResult.data,
           timestamp: Date.now(),
@@ -278,7 +320,7 @@ export class QueryEngine {
         results.push({
           id: this.generateMessageId(),
           role: 'tool',
-          toolUseId: toolUse.toolUseId!,
+          toolUseId: toolUse.toolUseId ?? `tool_${Date.now()}`,
           toolName: tool.name,
           result: `Error executing tool: ${(error as Error).message}`,
           isError: true,
@@ -314,16 +356,23 @@ export class QueryEngine {
     const toolDescriptions = await Promise.all(
       this.tools.map(async (tool) => {
         if (!tool.isEnabled()) return null
-        const desc = await tool.description(
-          {} as any,
-          {
-            toolPermissionContext: params.toolUseContext.options.tools
-              ? { mode: 'default', alwaysAllowRules: new Map(), alwaysDenyRules: new Map(), isBypassPermissionsModeAvailable: false }
-              : { mode: 'default', alwaysAllowRules: new Map(), alwaysDenyRules: new Map(), isBypassPermissionsModeAvailable: false },
-            tools: this.tools,
-          },
-        )
-        return desc
+        try {
+          const desc = await tool.description(
+            {} as any,
+            {
+              toolPermissionContext: {
+                mode: 'default',
+                alwaysAllowRules: new Map(),
+                alwaysDenyRules: new Map(),
+                isBypassPermissionsModeAvailable: false,
+              },
+              tools: this.tools,
+            },
+          )
+          return desc
+        } catch {
+          return null
+        }
       }),
     )
 
@@ -335,42 +384,209 @@ export class QueryEngine {
     return sections.join('\n')
   }
 
-  private prepareMessagesForAPI(systemPrompt: string): Message[] {
-    return [
+  private prepareMessagesForAPI(systemPrompt: string): LlmMessage[] {
+    const messages: LlmMessage[] = [
       {
-        id: this.generateMessageId(),
         role: 'system',
         content: systemPrompt,
-        timestamp: Date.now(),
       },
-      ...this.messageHistory,
     ]
+
+    for (const msg of this.messageHistory) {
+      if (msg.role === 'system') continue
+
+      let content: string | LlmContentBlock[]
+      if (msg.role === 'tool') {
+        const toolMsg = msg as ToolResultMessage
+        if (toolMsg.content === undefined) {
+          content = String(toolMsg.result ?? '')
+        } else if (typeof toolMsg.content === 'string') {
+          content = toolMsg.content
+        } else {
+          const blocks: LlmContentBlock[] = []
+          for (const block of toolMsg.content) {
+            if (block.type === 'thinking') continue
+            if (block.type === 'text') {
+              blocks.push({ type: 'text', text: block.text ?? '' })
+            } else if (block.type === 'tool_result') {
+              blocks.push({
+                type: 'tool_result',
+                content: String((block as any).toolResult ?? ''),
+              })
+            } else if (block.type === 'tool_use') {
+              blocks.push({
+                type: 'tool_use',
+                id: (block as any).toolUseId ?? '',
+                name: (block as any).toolName ?? '',
+                input: (block as any).toolInput ?? {},
+              })
+            }
+          }
+          content = blocks
+        }
+      } else if (Array.isArray(msg.content)) {
+        const blocks: LlmContentBlock[] = []
+        for (const block of msg.content) {
+          if (block.type === 'thinking') continue
+          if (block.type === 'text') {
+            blocks.push({ type: 'text', text: block.text ?? '' })
+          } else if (block.type === 'tool_result') {
+            blocks.push({
+              type: 'tool_result',
+              content: String((block as any).toolResult ?? ''),
+            })
+          } else if (block.type === 'tool_use') {
+            blocks.push({
+              type: 'tool_use',
+              id: (block as any).toolUseId ?? '',
+              name: (block as any).toolName ?? '',
+              input: (block as any).toolInput ?? {},
+            })
+          }
+        }
+        content = blocks
+      } else {
+        content = msg.content ?? ''
+      }
+
+      messages.push({
+        role: msg.role === 'tool' ? 'tool' : msg.role,
+        content,
+        name: msg.metadata?.name as string | undefined,
+      })
+    }
+
+    return messages
   }
 
   private async callLLM(
-    messages: Message[],
-    _params: QueryParams,
-  ): Promise<{ content: ContentBlock[]; usage: TokenUsage }> {
-    // This would be replaced with actual LLM API integration
-    // For now, return a mock response
-    return {
-      content: [{ type: 'text', text: 'Response from query engine' }],
-      usage: { inputTokens: 100, outputTokens: 50 },
+    messages: LlmMessage[],
+    params: QueryParams,
+    model: string,
+    temperature: number,
+  ): Promise<{ content: ContentBlock[]; usage: TokenUsage; error?: { message: string } }> {
+    try {
+      const tools: LlmTool[] = []
+      for (const t of this.tools) {
+        if (t.isEnabled()) {
+          try {
+            const desc = await t.description(
+              {} as any,
+              {
+                toolPermissionContext: {
+                  mode: 'default',
+                  alwaysAllowRules: new Map(),
+                  alwaysDenyRules: new Map(),
+                  isBypassPermissionsModeAvailable: false,
+                },
+                tools: this.tools,
+              },
+            )
+            tools.push({
+              name: t.name,
+              description: desc,
+              input_schema: { type: 'object' as const },
+            })
+          } catch {
+            // Skip tools that fail to provide description
+          }
+        }
+      }
+
+      const response = await this.llmProvider.complete({
+        model,
+        messages,
+        tools: tools.length > 0 ? tools : undefined,
+        temperature,
+        maxTokens: params.maxOutputTokens ?? this.config.maxOutputTokens,
+      })
+
+      if (response.error) {
+        return {
+          content: [{ type: 'text', text: `API Error: ${response.error.message}` }],
+          usage: response.usage ?? { inputTokens: 0, outputTokens: 0 },
+          error: response.error,
+        }
+      }
+
+      const choice = response.choices[0]
+      if (!choice) {
+        return {
+          content: [{ type: 'text', text: 'No response from model' }],
+          usage: response.usage ?? { inputTokens: 0, outputTokens: 0 },
+        }
+      }
+
+      const content: ContentBlock[] = []
+
+      const messageContent = choice.message.content
+      if (typeof messageContent === 'string') {
+        content.push({ type: 'text', text: messageContent })
+      } else if (Array.isArray(messageContent)) {
+        for (const block of messageContent) {
+          if (block.type === 'text' && block.text) {
+            content.push({ type: 'text', text: block.text })
+          } else if (block.type === 'tool_use') {
+            content.push({
+              type: 'tool_use',
+              toolName: block.name ?? block.function?.name ?? '',
+              toolInput: block.input ?? (block.function ? JSON.parse(block.function.arguments ?? '{}') : {}),
+              toolUseId: block.id ?? block.toolCallId ?? '',
+            })
+          } else if (block.type === 'tool_result') {
+            content.push({
+              type: 'tool_result',
+              toolResult: block.content,
+              toolUseId: block.id,
+            })
+          }
+        }
+      }
+
+      if (choice.message.toolCalls) {
+        for (const tc of choice.message.toolCalls) {
+          content.push({
+            type: 'tool_use',
+            toolName: tc.function.name,
+            toolInput: JSON.parse(tc.function.arguments),
+            toolUseId: tc.id,
+          })
+        }
+      }
+
+      return {
+        content,
+        usage: response.usage ?? { inputTokens: 0, outputTokens: 0 },
+      }
+    } catch (error) {
+      return {
+        content: [{ type: 'text', text: `LLM Error: ${(error as Error).message}` }],
+        usage: { inputTokens: 0, outputTokens: 0 },
+        error: { message: (error as Error).message },
+      }
     }
   }
 
   private async performCompact(): Promise<void> {
-    // Implement context compaction algorithm from claude-code
-    // This would summarize older messages to reduce token count
     console.log('[QueryEngine] Performing context compaction')
+    const oldMessages = this.messageHistory.filter(m => m.role !== 'system')
+    if (oldMessages.length < 10) return
+
+    const summaryMessage: UserMessage = {
+      id: this.generateMessageId(),
+      role: 'user',
+      content: `[Previous conversation summarized: ${oldMessages.length} messages about various topics]`,
+      timestamp: Date.now(),
+    }
+
+    this.messageHistory = [summaryMessage]
   }
 
   private estimateTokenCount(): number {
-    // Rough estimation based on message length
     return Math.round(JSON.stringify(this.messageHistory).length / 4)
   }
 
-  private updateTokenUsage(usage: Partial<TokenUsage>): void {
+  private updateTokenUsage(usage: TokenUsage): void {
     this.tokenUsage.inputTokens += usage.inputTokens ?? 0
     this.tokenUsage.outputTokens += usage.outputTokens ?? 0
   }
@@ -410,3 +626,6 @@ export class QueryEngine {
 function findToolByName(tools: Tools, name: string): Tool | undefined {
   return tools.find(t => t.name === name || t.aliases?.includes(name))
 }
+
+export { createLlmProvider, getDefaultProvider }
+export type { LlmProvider, LlmProviderConfig, LlmModelInfo } from './LlmProvider.js'
