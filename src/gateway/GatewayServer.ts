@@ -88,12 +88,11 @@ export class GatewayServer {
 
     this.wss = new WebSocketServer({
       server: this.server,
-      path: this.config.path,
       maxPayload: 1024 * 1024, // 1MB
     })
 
-    this.wss.on('connection', this.handleConnection.bind(this))
-    this.wss.on('error', this.handleError.bind(this))
+    this.wss.on('connection', (ws, req) => this.handleConnection(ws, req))
+    this.wss.on('error', (error) => this.handleError(error))
 
     await new Promise<void>((resolve, reject) => {
       this.server!.listen(this.config.port, this.config.host, () => {
